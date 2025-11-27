@@ -1,0 +1,411 @@
+﻿@page "/apotheken"
+@inject HttpClient Http
+@using SupportTools.Shared.Models
+@using Microsoft.AspNetCore.Components
+@using Microsoft.AspNetCore.Components.Web
+@using Microsoft.AspNetCore.Components.Web.Virtualization
+@using Microsoft.AspNetCore.Components.Forms
+@using System.ComponentModel.DataAnnotations
+
+<h3>🔍 Apotheek zoeken</h3>
+
+<div class="mb-3">
+    <input @bind="zoekterm" @bind:event="oninput" @bind:after="OnZoektermAfter" placeholder="Zoek op AGB, naam of MosadexId" class="form-control" />
+    <button @onclick="ZoekApotheken" class="btn btn-primary mt-2" disabled="@isLoading">Zoeken</button>
+</div>
+
+@if (!string.IsNullOrEmpty(foutmelding))
+{
+    <div class="alert alert-danger mt-3">@foutmelding</div>
+}
+
+@if (isLoading)
+{
+    <p><em>Bezig met zoeken...</em></p>
+}
+else if (geselecteerdeApotheek is not null)
+{
+    <div class="card mt-2">
+        <div class="card-body py-2">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <strong>@geselecteerdeApotheek.Naam</strong>
+                    <div class="small text-muted">AGB: @geselecteerdeApotheek.AGB • MosadexId: @geselecteerdeApotheek.MosadexId</div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-success btn-sm" @onclick="ToggleAddForm" disabled="@(isMutating || isAtcLoading)">ATC-code toevoegen</button>
+                    <button class="btn btn-outline-secondary btn-sm" @onclick="ClearSelection" disabled="@isMutating">Terug</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @if (showAddForm)
+    {
+        <div class="card mt-2">
+            <div class="card-body">
+                <EditForm Model="newAtcInput" OnValidSubmit="OnSubmitAtc">
+                    <DataAnnotationsValidator />
+                    <div class="row g-2">
+                        <div class="col-12 col-md-4">
+                            <label class="form-label">Zoek ATC-code</label>
+                            <input value="@atcSearch" @oninput="OnAtcInputChanged" class="form-control form-control-sm" placeholder="Typ deel van code of naam" />
+                        </div>
+                        <div class="col-12 col-md-4">
+                            <label class="form-label">Geselecteerde code</label>
+                            <input @bind="newAtcInput.Code" class="form-control form-control-sm" readonly />
+                        </div>
+                        <div class="col-auto align-self-end d-flex gap-2">
+                            <button type="submit" class="btn btn-sm @(replaceChildrenConfirm ? "btn-warning" : "btn-success")" disabled="@(string.IsNullOrWhiteSpace(newAtcInput.Code) || isMutating)">
+                                @(replaceChildrenConfirm ? "Bevestig vervanging" : "Koppel")
+                            </button>
+                            <button type="button" class="btn btn-sm btn-outline-secondary" @onclick="ToggleAddForm" disabled="@isMutating">Annuleer</button>
+                        </div>
+                    </div>
+                </EditForm>
+
+                @if (parentExistsConflict)
+                {
+                    <div class="alert alert-danger mt-3 mb-2">
+                        <div class="fw-bold">⚠️ Actie niet toegestaan</div>
+                        <div class="mt-1">
+                            De geselecteerde code <code>@newAtcInput.Code</code> is een child van een al gekoppelde hogere (parent) code. 
+                            Om inconsistentie te voorkomen kan een child niet worden gekoppeld wanneer de parent al bestaat.
+                        </div>
+                        <div class="mt-1 small text-muted">Kies een andere ATC-code of verwijder eerst de bestaande hogere code.</div>
+                    </div>
+                }
+                else if (replaceChildrenConfirm && pendingChildrenRemoval.Any())
+                {
+                    <div class="alert alert-warning mt-3 mb-2">
+                        <div class="fw-bold">⚠️ Bevestiging vereist</div>
+                        <div class="mt-1">
+                            Het koppelen van <code>@newAtcInput.Code</code> vervangt en verwijdert onderstaande gekoppelde child-code(s):
+                        </div>
+                        <ul class="small mt-2 mb-0">
+                            @foreach (var child in pendingChildrenRemoval)
+                            {
+                                <li><code>@child</code></li>
+                            }
+                        </ul>
+                        <div class="mt-2">
+                            <strong>Controleer of dit gewenst is.</strong> Klik op <em>Bevestig vervanging</em> om door te gaan, of annuleer om alles te behouden.
+                        </div>
+                    </div>
+                }
+
+                <div class="mt-2">
+                    <small class="text-muted">Matches (server, scrollbaar na 5): klik op een rij om te selecteren.</small>
+                    <div class="border rounded mt-1" style="max-height: 9rem; overflow: auto;">
+                        @if (isSuggestLoading)
+                        {
+                            <div class="p-2 small text-muted">Zoeken...</div>
+                        }
+                        else if (atcSuggestions.Count == 0)
+                        {
+                            <div class="p-2 text-muted small">Geen resultaten.</div>
+                        }
+                        else
+                        {
+                            @foreach (var c in atcSuggestions)
+                            {
+                                <div class="px-2 py-1 small d-flex justify-content-between align-items-center selectable-row" style="cursor:pointer;" @onclick="() => SelectAtc(c)">
+                                    <span><strong>@c.Code</strong> — @c.Naam</span>
+                                    @if (_linkedCodes.Contains(c.Code))
+                                    {
+                                        <span class="badge bg-secondary">Gekoppeld</span>
+                                    }
+                                </div>
+                            }
+                        }
+                    </div>
+                </div>
+
+                @if (!string.IsNullOrEmpty(addStatus))
+                {
+                    <small class="d-block mt-2 @(replaceChildrenConfirm || parentExistsConflict ? "text-warning" : "text-muted")">@addStatus</small>
+                }
+            </div>
+        </div>
+    }
+
+    <h5 class="mt-3">ATC-codes</h5>
+    <p class="text-muted">Aantal: @atcCodes.Count</p>
+
+    @if (isAtcLoading)
+    {
+        <p><em>ATC-codes laden...</em></p>
+    }
+    else if (atcCodes.Any())
+    {
+        <div class="list-group">
+            <Virtualize TItem="AtcCodeDto" Items="sortedAtcCodes">
+                <ItemContent Context="atc">
+                    <div class="list-group-item d-flex justify-content-between align-items-start">
+                        <div>
+                            <div><strong>@atc.Code</strong></div>
+                            <div class="small text-muted">@atc.Naam</div>
+                        </div>
+                        <button class="btn btn-sm btn-outline-danger" title="Verwijder" @onclick="() => _ = DeleteAtcCode(atc)" disabled="@isMutating">✖</button>
+                    </div>
+                </ItemContent>
+            </Virtualize>
+        </div>
+    }
+    else
+    {
+        <p class="text-muted">Geen ATC-codes gevonden.</p>
+    }
+}
+else if (resultaten is not null && resultaten.Any())
+{
+    <p class="text-muted">Resultaten: @resultaten.Count</p>
+    <div>
+        @foreach (var apotheek in resultaten)
+        {
+            <div class="card mb-1" @onclick="() => ToonAtcCodes(apotheek)" style="cursor:pointer;">
+                <div class="card-body py-2">
+                    <div class="d-flex justify-content-between">
+                        <strong>@apotheek.Naam</strong>
+                        <span class="text-muted">AGB: @apotheek.AGB</span>
+                    </div>
+                    <small class="text-muted">MosadexId: @apotheek.MosadexId</small>
+                </div>
+            </div>
+        }
+    </div>
+}
+else if (!string.IsNullOrWhiteSpace(zoekterm))
+{
+    <p class="text-muted">Geen resultaten gevonden voor "<strong>@zoekterm</strong>".</p>
+}
+
+@code {
+    private string zoekterm = string.Empty;
+    private List<ApotheekDto>? resultaten;
+    private ApotheekDto? geselecteerdeApotheek;
+    private List<AtcCodeDto> atcCodes = new();
+    private bool isLoading = false;
+    private bool isAtcLoading = false;
+    private bool isMutating = false;
+    private string foutmelding = string.Empty;
+
+    private bool showAddForm = false;
+    private AtcCodeInputModel newAtcInput = new();
+    private string addStatus = string.Empty;
+
+    // Server-side suggestions
+    private string atcSearch = string.Empty;
+    private List<AtcCodeDto> atcSuggestions = new();
+    private bool isSuggestLoading = false;
+
+    private HashSet<string> _linkedCodes = new();
+    private List<AtcCodeDto> sortedAtcCodes => atcCodes.OrderBy(a => a.Code).ThenBy(a => a.Naam).ToList();
+
+    private CancellationTokenSource? _debounceCts;
+    private const int DebounceMs = 300;
+
+    // NEW: hierarchy state flags (missing fields)
+    private bool replaceChildrenConfirm = false;
+    private List<string> pendingChildrenRemoval = new();
+    private bool parentExistsConflict = false;
+
+    private Task OnZoektermAfter() => OnZoektermDebounced();
+
+    private async Task OnZoektermDebounced()
+    {
+        _debounceCts?.Cancel();
+        _debounceCts = new CancellationTokenSource();
+        var token = _debounceCts.Token;
+        try
+        {
+            // Search from 1 character; only skip when empty or whitespace
+            if (string.IsNullOrWhiteSpace(zoekterm))
+            {
+                resultaten = null;
+                geselecteerdeApotheek = null;
+                atcCodes.Clear();
+                _linkedCodes.Clear();
+                return;
+            }
+            await Task.Delay(DebounceMs, token);
+            await ZoekApotheken(token);
+        }
+        catch (TaskCanceledException) { }
+    }
+
+    private async Task ZoekApotheken() => await ZoekApotheken(CancellationToken.None);
+
+    private async Task ZoekApotheken(CancellationToken cancellationToken)
+    {
+        foutmelding = string.Empty;
+        geselecteerdeApotheek = null;
+        atcCodes.Clear();
+        showAddForm = false;
+        try
+        {
+            isLoading = true;
+            var url = $"api/apotheken/search?query={Uri.EscapeDataString(zoekterm)}";
+            var response = await Http.GetAsync(url, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                foutmelding = $"Zoekopdracht mislukt: {(int)response.StatusCode}";
+                resultaten = null;
+            }
+            else
+            {
+                resultaten = await response.Content.ReadFromJsonAsync<List<ApotheekDto>>(cancellationToken: cancellationToken) ?? new();
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { foutmelding = $"Fout bij ophalen apotheken: {ex.Message}"; }
+        finally { isLoading = false; StateHasChanged(); }
+    }
+
+    private async Task ToonAtcCodes(ApotheekDto apotheek)
+    {
+        geselecteerdeApotheek = apotheek;
+        atcCodes.Clear();
+        isAtcLoading = true;
+        showAddForm = false;
+        addStatus = string.Empty;
+        atcSearch = string.Empty;
+        atcSuggestions.Clear();
+        try
+        {
+            var url = $"api/apotheken/{apotheek.Id}/atccodes";
+            atcCodes = await Http.GetFromJsonAsync<List<AtcCodeDto>>(url) ?? new();
+            _linkedCodes = new HashSet<string>(atcCodes.Select(c => c.Code));
+        }
+        catch (Exception ex) { foutmelding = $"Fout bij ophalen ATC-codes: {ex.Message}"; }
+        finally { isAtcLoading = false; }
+    }
+
+    private void ClearSelection()
+    {
+        geselecteerdeApotheek = null;
+        atcCodes.Clear();
+        showAddForm = false;
+        addStatus = string.Empty;
+        atcSearch = string.Empty;
+        atcSuggestions.Clear();
+    }
+
+    private void ToggleAddForm()
+    {
+        showAddForm = !showAddForm;
+        if (showAddForm)
+        {
+            newAtcInput = new();
+            addStatus = string.Empty;
+            atcSearch = string.Empty;
+            atcSuggestions.Clear();
+        }
+    }
+
+    private async Task OnAtcInputChanged(ChangeEventArgs e)
+    {
+        atcSearch = e.Value?.ToString() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(atcSearch)) { atcSuggestions.Clear(); StateHasChanged(); return; }
+        isSuggestLoading = true;
+        try
+        {
+            var url = $"api/apotheken/atccodes/suggest?term={Uri.EscapeDataString(atcSearch)}&take=20";
+            atcSuggestions = await Http.GetFromJsonAsync<List<AtcCodeDto>>(url) ?? new();
+        }
+        catch (Exception ex) { foutmelding = $"Fout bij zoeken ATC-codes: {ex.Message}"; }
+        finally { isSuggestLoading = false; StateHasChanged(); }
+    }
+
+    private void SelectAtc(AtcCodeDto c)
+    {
+        if (_linkedCodes.Contains(c.Code))
+        {
+            addStatus = "Deze code is al gekoppeld.";
+        }
+        else
+        {
+            newAtcInput.Code = c.Code;
+            addStatus = string.Empty;
+        }
+    }
+
+    private async Task AddAtcCode()
+    {
+        if (geselecteerdeApotheek is null || string.IsNullOrWhiteSpace(newAtcInput.Code)) return;
+        addStatus = string.Empty; isMutating = true;
+        try
+        {
+            var resp = await Http.PostAsJsonAsync($"api/apotheken/{geselecteerdeApotheek.Id}/atccodes", new { Code = newAtcInput.Code });
+            if (!resp.IsSuccessStatusCode)
+            {
+                // handle conflicts from server hierarchy logic
+                var conflict = await resp.Content.ReadFromJsonAsync<HierarchyConflictResponse>();
+                if (conflict?.Type == "parentExists")
+                {
+                    addStatus = conflict.Message; parentExistsConflict = true; replaceChildrenConfirm = false; pendingChildrenRemoval.Clear();
+                }
+                else if (conflict?.Type == "childrenReplaceRequired")
+                {
+                    replaceChildrenConfirm = true; parentExistsConflict = false; pendingChildrenRemoval = conflict.ChildrenToRemove; addStatus = conflict.Message;
+                }
+                else
+                {
+                    addStatus = $"Toevoegen mislukt: {(int)resp.StatusCode}"; parentExistsConflict = false; replaceChildrenConfirm = false; pendingChildrenRemoval.Clear();
+                }
+            }
+            else
+            {
+                var added = await resp.Content.ReadFromJsonAsync<AtcCodeDto>();
+                if (added != null && _linkedCodes.Add(added.Code)) atcCodes.Add(added);
+                addStatus = "ATC-code toegevoegd."; showAddForm = false; parentExistsConflict = false; replaceChildrenConfirm = false; pendingChildrenRemoval.Clear();
+            }
+        }
+        catch (Exception ex) { addStatus = $"Fout: {ex.Message}"; }
+        finally { isMutating = false; }
+    }
+
+    private async Task ConfirmReplaceChildren()
+    {
+        if (!replaceChildrenConfirm || geselecteerdeApotheek is null || string.IsNullOrWhiteSpace(newAtcInput.Code)) return;
+        addStatus = string.Empty; isMutating = true;
+        try
+        {
+            var url = $"api/apotheken/{geselecteerdeApotheek.Id}/atccodes?force=true";
+            var resp = await Http.PostAsJsonAsync(url, new { Code = newAtcInput.Code });
+            if (!resp.IsSuccessStatusCode)
+            {
+                addStatus = $"Force toevoegen mislukt: {(int)resp.StatusCode}";
+            }
+            else
+            {
+                atcCodes.RemoveAll(c => pendingChildrenRemoval.Contains(c.Code)); foreach (var child in pendingChildrenRemoval) _linkedCodes.Remove(child);
+                var added = await resp.Content.ReadFromJsonAsync<AtcCodeDto>(); if (added != null && _linkedCodes.Add(added.Code)) atcCodes.Add(added);
+                addStatus = "Child-codes vervangen door parent."; showAddForm = false; replaceChildrenConfirm = false; pendingChildrenRemoval.Clear(); parentExistsConflict = false;
+            }
+        }
+        catch (Exception ex) { addStatus = $"Fout: {ex.Message}"; }
+        finally { isMutating = false; }
+    }
+
+    private async Task DeleteAtcCode(AtcCodeDto atc)
+    {
+        if (geselecteerdeApotheek is null) return; isMutating = true;
+        try
+        {
+            var resp = await Http.DeleteAsync($"api/apotheken/{geselecteerdeApotheek.Id}/atccodes/{Uri.EscapeDataString(atc.Code)}");
+            if (!resp.IsSuccessStatusCode) { foutmelding = $"Verwijderen mislukt: {(int)resp.StatusCode}"; }
+            else { atcCodes.Remove(atc); _linkedCodes.Remove(atc.Code); }
+        }
+        catch (Exception ex) { foutmelding = $"Fout bij verwijderen: {ex.Message}"; }
+        finally { isMutating = false; }
+    }
+
+    private class HierarchyConflictResponse { public string Type { get; set; } = string.Empty; public string Message { get; set; } = string.Empty; public List<string> ChildrenToRemove { get; set; } = new(); }
+    private class AtcCodeInputModel { [Required][MaxLength(20)] public string? Code { get; set; } }
+
+    private async Task OnSubmitAtc(EditContext context)
+    {
+        if (replaceChildrenConfirm) await ConfirmReplaceChildren(); else await AddAtcCode();
+    }
+}

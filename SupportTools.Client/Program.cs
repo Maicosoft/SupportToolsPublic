@@ -1,0 +1,14 @@
+using Microsoft.AspNetCore.Components.Web;
+using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
+using SupportTools.Client;
+
+var builder = WebAssemblyHostBuilder.CreateDefault(args);
+builder.RootComponents.Add<App>("#app");
+builder.RootComponents.Add<HeadOutlet>("head::after");
+
+// ✅ Gebruik alleen één HttpClient, gericht op je backend
+builder.Services.AddScoped(sp => new HttpClient {
+    BaseAddress = new Uri("https://localhost:5001/")
+});
+
+await builder.Build().RunAsync();
